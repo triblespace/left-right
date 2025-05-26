@@ -313,8 +313,8 @@ where
     /// have departed. Then it drops one of the copies of the data and
     /// returns the other copy in a Box.
     pub fn take(self) -> Box<T> {
-        use std::ptr;
         use std::mem;
+        use std::ptr;
         // first, ensure the read handle is up-to-date with all operations
         let mut this = mem::ManuallyDrop::new(self);
         if this.swap_index != this.oplog.len() {
@@ -356,7 +356,9 @@ where
         unsafe { ptr::drop_in_place(&mut this.r_handle) };
         unsafe { ptr::drop_in_place(&mut this.last_epochs) };
         #[cfg(test)]
-        unsafe { ptr::drop_in_place(&mut this.is_waiting) };
+        unsafe {
+            ptr::drop_in_place(&mut this.is_waiting)
+        };
 
         // return the boxed r_handle
         boxed_r_handle
