@@ -1,6 +1,6 @@
 [package]
 name = "reft-light"
-version = "0.11.5"
+version = "0.1.0"
 authors = ["Jon Gjengset <jon@thesquareplanet.com>", "Jan-Paul Bultmann <jp@bultmann.eu>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
