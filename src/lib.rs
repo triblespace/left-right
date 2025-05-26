@@ -64,7 +64,7 @@
 //! yourself, here's what you do:
 //!
 //! ```rust
-//! use left_right::{Absorb, ReadHandle, WriteHandle};
+//! use reft_light::{Absorb, ReadHandle, WriteHandle};
 //!
 //! // First, define an operational log type.
 //! // For most real-world use-cases, this will be an `enum`, but we'll keep it simple:
@@ -90,19 +90,13 @@
 //!     fn absorb_second(&mut self, operation: CounterAddOp, _: &Self) {
 //!         *self += operation.0;
 //!     }
-//!
-//!     // See the documentation of `Absorb::drop_first`.
-//!     fn drop_first(self: Box<Self>) {}
-//!
-//!     fn sync_with(&mut self, first: &Self) {
-//!         *self = *first
-//!     }
 //! }
 //!
 //! // Now, you can construct a new left-right over an instance of your data structure.
 //! // This will give you a `WriteHandle` that accepts writes in the form of oplog entries,
-//! // and a (cloneable) `ReadHandle` that gives you `&` access to the data structure.
-//! let (write, read) = left_right::new::<i32, CounterAddOp>();
+//! // which can be converted into a (cloneable) `ReadHandle` that gives you `&` access to the data structure.
+//! let write = reft_light::new::<i32, CounterAddOp>(0);
+//! let read = write.clone();
 //!
 //! // You will likely want to embed these handles in your own types so that you can
 //! // provide more ergonomic methods for performing operations on your type.
@@ -181,13 +175,10 @@ use crate::sync::{Arc, AtomicUsize, Mutex};
 type Epochs = Arc<Mutex<slab::Slab<Arc<AtomicUsize>>>>;
 
 mod write;
-pub use crate::write::Taken;
 pub use crate::write::WriteHandle;
 
 mod read;
 pub use crate::read::{ReadGuard, ReadHandle, ReadHandleFactory};
-
-pub mod aliasing;
 
 /// Types that can incorporate operations of type `O`.
 ///
@@ -207,11 +198,6 @@ pub mod aliasing;
 /// ensure deterministic results when it is applied to the second copy. Or, they may need to
 /// ensure that removed values in the data structure are only dropped when they are removed from
 /// _both_ copies, in case they alias the backing data to save memory.
-///
-/// For the same reason, `Absorb` allows implementors to define `drop_first`, which is used to drop
-/// the first of the two copies. In this case, de-duplicating implementations may need to forget
-/// values rather than drop them so that they are not dropped twice when the second copy is
-/// dropped.
 pub trait Absorb<O> {
     /// Apply `O` to the first of the two copies.
     ///
@@ -236,64 +222,18 @@ pub trait Absorb<O> {
     fn absorb_second(&mut self, mut operation: O, other: &Self) {
         Self::absorb_first(self, &mut operation, other)
     }
-
-    /// Drop the first of the two copies.
-    ///
-    /// Defaults to calling `Self::drop`.
-    #[allow(clippy::boxed_local)]
-    fn drop_first(self: Box<Self>) {}
-
-    /// Drop the second of the two copies.
-    ///
-    /// Defaults to calling `Self::drop`.
-    #[allow(clippy::boxed_local)]
-    fn drop_second(self: Box<Self>) {}
-
-    /// Sync the data from `first` into `self`.
-    ///
-    /// To improve initialization performance, before the first call to `publish` changes aren't
-    /// added to the internal oplog, but applied to the first copy directly using `absorb_second`.
-    /// The first `publish` then calls `sync_with` instead of `absorb_second`.
-    ///
-    /// `sync_with` should ensure that `self`'s state exactly matches that of `first` after it
-    /// returns. Be particularly mindful of non-deterministic implementations of traits that are
-    /// often assumed to be deterministic (like `Eq` and `Hash`), and of "hidden states" that
-    /// subtly affect results like the `RandomState` of a `HashMap` which can change iteration
-    /// order.
-    fn sync_with(&mut self, first: &Self);
 }
 
-/// Construct a new write and read handle pair from an empty data structure.
+/// Construct a new write handle from an initial data structure.
 ///
 /// The type must implement `Clone` so we can construct the second copy from the first.
-pub fn new_from_empty<T, O>(t: T) -> (WriteHandle<T, O>, ReadHandle<T>)
+pub fn new<T, O>(t: T) -> WriteHandle<T, O>
 where
     T: Absorb<O> + Clone,
 {
     let epochs = Default::default();
 
     let r = ReadHandle::new(t.clone(), Arc::clone(&epochs));
-    let w = WriteHandle::new(t, epochs, r.clone());
-    (w, r)
-}
-
-/// Construct a new write and read handle pair from the data structure default.
-///
-/// The type must implement `Default` so we can construct two empty instances. You must ensure that
-/// the trait's `Default` implementation is deterministic and idempotent - that is to say, two
-/// instances created by it must behave _exactly_ the same. An example of where this is problematic
-/// is `HashMap` - due to `RandomState`, two instances returned by `Default` may have a different
-/// iteration order.
-///
-/// If your type's `Default` implementation does not guarantee this, you can use `new_from_empty`,
-/// which relies on `Clone` instead of `Default`.
-pub fn new<T, O>() -> (WriteHandle<T, O>, ReadHandle<T>)
-where
-    T: Absorb<O> + Default,
-{
-    let epochs = Default::default();
-
-    let r = ReadHandle::new(T::default(), Arc::clone(&epochs));
-    let w = WriteHandle::new(T::default(), epochs, r.clone());
-    (w, r)
+    let w = WriteHandle::new(t, epochs, r);
+    w
 }

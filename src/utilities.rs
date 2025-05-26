@@ -11,10 +11,4 @@ impl Absorb<CounterAddOp> for i32 {
     fn absorb_second(&mut self, operation: CounterAddOp, _: &Self) {
         *self += operation.0;
     }
-
-    fn drop_first(self: Box<Self>) {}
-
-    fn sync_with(&mut self, first: &Self) {
-        *self = *first
-    }
 }

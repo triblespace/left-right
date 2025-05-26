@@ -43,7 +43,7 @@ impl<'rh, T: ?Sized> ReadGuard<'rh, T> {
     /// # Examples
     ///
     /// ```
-    /// use left_right::{ReadGuard, ReadHandle};
+    /// use reft_light::{ReadGuard, ReadHandle};
     ///
     /// fn get_str(handle: &ReadHandle<Vec<(String, i32)>>, i: usize) -> Option<ReadGuard<'_, str>> {
     ///     handle.enter().map(|guard| {
@@ -78,7 +78,7 @@ impl<'rh, T: ?Sized> ReadGuard<'rh, T> {
     /// # Examples
     ///
     /// ```
-    /// use left_right::{ReadGuard, ReadHandle};
+    /// use reft_light::{ReadGuard, ReadHandle};
     ///
     /// fn try_get_str(handle: &ReadHandle<Vec<(String, i32)>>, i: usize) -> Option<ReadGuard<'_, str>> {
     ///     handle.enter().and_then(|guard| {

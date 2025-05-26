@@ -3,8 +3,6 @@ use crate::Absorb;
 
 use crate::sync::{fence, Arc, AtomicUsize, MutexGuard, Ordering};
 use std::collections::VecDeque;
-use std::marker::PhantomData;
-use std::ops::DerefMut;
 use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -36,10 +34,6 @@ where
     refreshes: usize,
     #[cfg(test)]
     is_waiting: Arc<AtomicBool>,
-    /// Write directly to the write handle map, since no publish has happened.
-    first: bool,
-    /// A publish has happened, but the two copies have not been synchronized yet.
-    second: bool,
     /// If we call `Self::take` the drop needs to be different.
     taken: bool,
 }
@@ -68,70 +62,7 @@ where
             .field("oplog", &self.oplog)
             .field("swap_index", &self.swap_index)
             .field("r_handle", &self.r_handle)
-            .field("first", &self.first)
-            .field("second", &self.second)
             .finish()
-    }
-}
-
-/// A **smart pointer** to an owned backing data structure. This makes sure that the
-/// data is dropped correctly (using [`Absorb::drop_second`]).
-///
-/// Additionally it allows for unsafely getting the inner data out using [`into_box()`](Taken::into_box).
-pub struct Taken<T: Absorb<O>, O> {
-    inner: Option<Box<T>>,
-    _marker: PhantomData<O>,
-}
-
-impl<T: Absorb<O> + std::fmt::Debug, O> std::fmt::Debug for Taken<T, O> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Taken")
-            .field(
-                "inner",
-                self.inner
-                    .as_ref()
-                    .expect("inner is only taken in `into_box` which drops self"),
-            )
-            .finish()
-    }
-}
-
-impl<T: Absorb<O>, O> Deref for Taken<T, O> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner
-            .as_ref()
-            .expect("inner is only taken in `into_box` which drops self")
-    }
-}
-
-impl<T: Absorb<O>, O> DerefMut for Taken<T, O> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner
-            .as_mut()
-            .expect("inner is only taken in `into_box` which drops self")
-    }
-}
-
-impl<T: Absorb<O>, O> Taken<T, O> {
-    /// This is unsafe because you must call [`Absorb::drop_second`] in
-    /// case just dropping `T` is not safe and sufficient.
-    ///
-    /// If you used the default implementation of [`Absorb::drop_second`] (which just calls [`drop`](Drop::drop))
-    /// you don't need to call [`Absorb::drop_second`].
-    pub unsafe fn into_box(mut self) -> Box<T> {
-        self.inner
-            .take()
-            .expect("inner is only taken here then self is dropped")
-    }
-}
-
-impl<T: Absorb<O>, O> Drop for Taken<T, O> {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            T::drop_second(inner);
-        }
     }
 }
 
@@ -142,9 +73,9 @@ where
     /// Takes out the inner backing data structure if it hasn't been taken yet. Otherwise returns `None`.
     ///
     /// Makes sure that all the pending operations are applied and waits till all the read handles
-    /// have departed. Then it uses [`Absorb::drop_first`] to drop one of the copies of the data and
+    /// have departed. Then drops one of the copies of the data and
     /// returns the other copy as a [`Taken`] smart pointer.
-    fn take_inner(&mut self) -> Option<Taken<T, O>> {
+    fn take_inner(&mut self) -> Option<Box<T>> {
         use std::ptr;
         // Can only take inner once.
         if self.taken {
@@ -156,9 +87,12 @@ where
 
         // first, ensure both copies are up to date
         // (otherwise safely dropping the possibly duplicated w_handle data is a pain)
-        if self.first || !self.oplog.is_empty() {
+        // drain up to the swap_index, which is the number of operations that have been applied to the
+        // w_handle copy, but not the r_handle copy.
+        if !self.oplog.is_empty() {
             self.publish();
         }
+        // drains the oplog fully because the swap_index is now equal to the oplog length.
         if !self.oplog.is_empty() {
             self.publish();
         }
@@ -180,7 +114,7 @@ where
         // give the underlying data structure an opportunity to handle the one copy differently:
         //
         // safety: w_handle was initially crated from a `Box`, and is no longer aliased.
-        Absorb::drop_first(unsafe { Box::from_raw(self.w_handle.as_ptr()) });
+        drop(unsafe { Box::from_raw(self.w_handle.as_ptr()) });
 
         // next we take the r_handle and return it as a boxed value.
         //
@@ -190,10 +124,7 @@ where
         // safety: r_handle was initially crated from a `Box`, and is no longer aliased.
         let boxed_r_handle = unsafe { Box::from_raw(r_handle) };
 
-        Some(Taken {
-            inner: Some(boxed_r_handle),
-            _marker: PhantomData,
-        })
+        Some(boxed_r_handle)
     }
 }
 
@@ -225,8 +156,6 @@ where
             is_waiting: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             refreshes: 0,
-            first: true,
-            second: true,
             taken: false,
         }
     }
@@ -312,47 +241,37 @@ where
 
         self.wait(&mut epochs);
 
-        if !self.first {
-            // all the readers have left!
-            // safety: we haven't freed the Box, and no readers are accessing the w_handle
-            let w_handle = unsafe { self.w_handle.as_mut() };
+        // all the readers have left!
+        // safety: we haven't freed the Box, and no readers are accessing the w_handle
+        let w_handle = unsafe { self.w_handle.as_mut() };
 
-            // safety: we will not swap while we hold this reference
-            let r_handle = unsafe {
-                self.r_handle
-                    .inner
-                    .load(Ordering::Acquire)
-                    .as_ref()
-                    .unwrap()
-            };
+        // safety: we will not swap while we hold this reference
+        let r_handle = unsafe {
+            self.r_handle
+                .inner
+                .load(Ordering::Acquire)
+                .as_ref()
+                .unwrap()
+        };
 
-            if self.second {
-                Absorb::sync_with(w_handle, r_handle);
-                self.second = false
+        // the w_handle copy has not seen any of the writes in the oplog
+        // the r_handle copy has not seen any of the writes following swap_index
+        if self.swap_index != 0 {
+            // we can drain out the operations that only the w_handle copy needs
+            //
+            // NOTE: the if above is because drain(0..0) would remove 0
+            for op in self.oplog.drain(0..self.swap_index) {
+                T::absorb_second(w_handle, op, r_handle);
             }
-
-            // the w_handle copy has not seen any of the writes in the oplog
-            // the r_handle copy has not seen any of the writes following swap_index
-            if self.swap_index != 0 {
-                // we can drain out the operations that only the w_handle copy needs
-                //
-                // NOTE: the if above is because drain(0..0) would remove 0
-                for op in self.oplog.drain(0..self.swap_index) {
-                    T::absorb_second(w_handle, op, r_handle);
-                }
-            }
-            // we cannot give owned operations to absorb_first
-            // since they'll also be needed by the r_handle copy
-            for op in self.oplog.iter_mut() {
-                T::absorb_first(w_handle, op, r_handle);
-            }
-            // the w_handle copy is about to become the r_handle, and can ignore the oplog
-            self.swap_index = self.oplog.len();
-
-        // w_handle (the old r_handle) is now fully up to date!
-        } else {
-            self.first = false
         }
+        // we cannot give owned operations to absorb_first
+        // since they'll also be needed by the r_handle copy
+        for op in self.oplog.iter_mut() {
+            T::absorb_first(w_handle, op, r_handle);
+        }
+        // the w_handle copy is about to become the r_handle, and can ignore the oplog
+        self.swap_index = self.oplog.len();
+        // w_handle (the old r_handle) is now fully up to date!
 
         // at this point, we have exclusive access to w_handle, and it is up-to-date with all
         // writes. the stale r_handle is accessed by readers through an Arc clone of atomic pointer
@@ -429,9 +348,9 @@ where
     /// Returns the backing data structure.
     ///
     /// Makes sure that all the pending operations are applied and waits till all the read handles
-    /// have departed. Then it uses [`Absorb::drop_first`] to drop one of the copies of the data and
-    /// returns the other copy as a [`Taken`] smart pointer.
-    pub fn take(mut self) -> Taken<T, O> {
+    /// have departed. Then it drops one of the copies of the data and
+    /// returns the other copy in a Box.
+    pub fn take(mut self) -> Box<T> {
         // It is always safe to `expect` here because `take_inner` is private
         // and it is only called here and in the drop impl. Since we have an owned
         // `self` we know the drop has not yet been called. And every first call of
@@ -464,32 +383,18 @@ where
     where
         I: IntoIterator<Item = O>,
     {
-        if self.first {
-            // Safety: we know there are no outstanding w_handle readers, since we haven't
-            // refreshed ever before, so we can modify it directly!
-            let mut w_inner = self.raw_write_handle();
-            let w_inner = unsafe { w_inner.as_mut() };
-            let r_handle = self.enter().expect("map has not yet been destroyed");
-            // Because we are operating directly on the map, and nothing is aliased, we do want
-            // to perform drops, so we invoke absorb_second.
-            for op in ops {
-                Absorb::absorb_second(w_inner, op, &*r_handle);
-            }
-        } else {
-            self.oplog.extend(ops);
-        }
+        self.oplog.extend(ops);
     }
 }
 
 /// `WriteHandle` can be sent across thread boundaries:
 ///
 /// ```
-/// use left_right::WriteHandle;
+/// use reft_light::WriteHandle;
 ///
 /// struct Data;
-/// impl left_right::Absorb<()> for Data {
+/// impl reft_light::Absorb<()> for Data {
 ///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
-///     fn sync_with(&mut self, _: &Self) {}
 /// }
 ///
 /// fn is_send<T: Send>() {
@@ -503,11 +408,11 @@ where
 /// Namely, the data type has to be `Send`:
 ///
 /// ```compile_fail
-/// use left_right::WriteHandle;
+/// use reft_light::WriteHandle;
 /// use std::rc::Rc;
 ///
 /// struct Data(Rc<()>);
-/// impl left_right::Absorb<()> for Data {
+/// impl reft_light::Absorb<()> for Data {
 ///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
 /// }
 ///
@@ -521,11 +426,11 @@ where
 /// .. the operation type has to be `Send`:
 ///
 /// ```compile_fail
-/// use left_right::WriteHandle;
+/// use reft_light::WriteHandle;
 /// use std::rc::Rc;
 ///
 /// struct Data;
-/// impl left_right::Absorb<Rc<()>> for Data {
+/// impl reft_light::Absorb<Rc<()>> for Data {
 ///     fn absorb_first(&mut self, _: &mut Rc<()>, _: &Self) {}
 /// }
 ///
@@ -539,11 +444,11 @@ where
 /// .. and the data type has to be `Sync` so it's still okay to read through `ReadHandle`s:
 ///
 /// ```compile_fail
-/// use left_right::WriteHandle;
+/// use reft_light::WriteHandle;
 /// use std::cell::Cell;
 ///
 /// struct Data(Cell<()>);
-/// impl left_right::Absorb<()> for Data {
+/// impl reft_light::Absorb<()> for Data {
 ///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
 /// }
 ///
@@ -565,22 +470,19 @@ mod tests {
 
     #[test]
     fn append_test() {
-        let (mut w, _r) = crate::new::<i32, _>();
-        assert_eq!(w.first, true);
+        let mut w = crate::new::<i32, _>(0);
         w.append(CounterAddOp(1));
-        assert_eq!(w.oplog.len(), 0);
-        assert_eq!(w.first, true);
+        assert_eq!(w.oplog.len(), 1);
         w.publish();
-        assert_eq!(w.first, false);
         w.append(CounterAddOp(2));
         w.append(CounterAddOp(3));
-        assert_eq!(w.oplog.len(), 2);
+        assert_eq!(w.oplog.len(), 3);
     }
 
     #[test]
     fn take_test() {
         // publish twice then take with no pending operations
-        let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
+        let mut w = crate::new::<i32, _>(2);
         w.append(CounterAddOp(1));
         w.publish();
         w.append(CounterAddOp(1));
@@ -588,7 +490,7 @@ mod tests {
         assert_eq!(*w.take(), 4);
 
         // publish twice then pending operation published by take
-        let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
+        let mut w = crate::new::<i32, _>(2);
         w.append(CounterAddOp(1));
         w.publish();
         w.append(CounterAddOp(1));
@@ -597,25 +499,25 @@ mod tests {
         assert_eq!(*w.take(), 6);
 
         // normal publish then pending operations published by take
-        let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
+        let mut w = crate::new::<i32, _>(2);
         w.append(CounterAddOp(1));
         w.publish();
         w.append(CounterAddOp(1));
         assert_eq!(*w.take(), 4);
 
         // pending operations published by take
-        let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
+        let mut w = crate::new::<i32, _>(2);
         w.append(CounterAddOp(1));
         assert_eq!(*w.take(), 3);
 
         // emptry op queue
-        let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
+        let mut w = crate::new::<i32, _>(2);
         w.append(CounterAddOp(1));
         w.publish();
         assert_eq!(*w.take(), 3);
 
         // no operations
-        let (w, _r) = crate::new_from_empty::<i32, _>(2);
+        let w = crate::new::<i32, _>(2);
         assert_eq!(*w.take(), 2);
     }
 
@@ -623,7 +525,7 @@ mod tests {
     fn wait_test() {
         use std::sync::{Arc, Barrier};
         use std::thread;
-        let (mut w, _r) = crate::new::<i32, _>();
+        let mut w = crate::new::<i32, _>(0);
 
         // Case 1: If epoch is set to default.
         let test_epochs: crate::Epochs = Default::default();
@@ -673,7 +575,8 @@ mod tests {
 
     #[test]
     fn flush_noblock() {
-        let (mut w, r) = crate::new::<i32, _>();
+        let mut w = crate::new::<i32, _>(0);
+        let r = w.clone();
         w.append(CounterAddOp(42));
         w.publish();
         assert_eq!(*r.enter().unwrap(), 42);
@@ -687,7 +590,7 @@ mod tests {
 
     #[test]
     fn flush_no_refresh() {
-        let (mut w, _) = crate::new::<i32, _>();
+        let mut w = crate::new::<i32, _>(0);
 
         // Until we refresh, writes are written directly instead of going to the
         // oplog (because there can't be any readers on the w_handle table).

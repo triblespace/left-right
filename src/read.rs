@@ -212,7 +212,7 @@ impl<T> ReadHandle<T> {
 /// `ReadHandle` cannot be shared across threads:
 ///
 /// ```compile_fail
-/// use left_right::ReadHandle;
+/// use reft_light::ReadHandle;
 ///
 /// fn is_sync<T: Sync>() {
 ///   // dummy function just used for its parameterized type bound
@@ -226,7 +226,7 @@ impl<T> ReadHandle<T> {
 /// But, it can be sent across threads:
 ///
 /// ```
-/// use left_right::ReadHandle;
+/// use reft_light::ReadHandle;
 ///
 /// fn is_send<T: Send>() {
 ///   // dummy function just used for its parameterized type bound
@@ -238,7 +238,7 @@ impl<T> ReadHandle<T> {
 /// As long as the wrapped type is `Sync` that is.
 ///
 /// ```compile_fail
-/// use left_right::ReadHandle;
+/// use reft_light::ReadHandle;
 ///
 /// fn is_send<T: Send>() {}
 ///

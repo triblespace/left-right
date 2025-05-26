@@ -1,12 +1,12 @@
 [package]
-name = "left-right"
+name = "reft-light"
 version = "0.11.5"
-authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+authors = ["Jon Gjengset <jon@thesquareplanet.com>", "Jan-Paul Bultmann <jp@bultmann.eu>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
 
 description = "A concurrency primitive for high concurrency reads over a single-writer data structure."
-repository = "https://github.com/jonhoo/left-right.git"
+repository = "https://github.com/triblespace/reft-light.git"
 
 keywords = ["concurrency","lock-free"]
 categories = ["concurrency"]
