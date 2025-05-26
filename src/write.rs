@@ -34,8 +34,6 @@ where
     refreshes: usize,
     #[cfg(test)]
     is_waiting: Arc<AtomicBool>,
-    /// If we call `Self::take` the drop needs to be different.
-    taken: bool,
 }
 
 // safety: if a `WriteHandle` is sent across a thread boundary, we need to be able to take
@@ -66,37 +64,16 @@ where
     }
 }
 
-impl<T, O> WriteHandle<T, O>
+impl<T, O> Drop for WriteHandle<T, O>
 where
     T: Absorb<O>,
 {
-    /// Takes out the inner backing data structure if it hasn't been taken yet. Otherwise returns `None`.
-    ///
-    /// Makes sure that all the pending operations are applied and waits till all the read handles
-    /// have departed. Then drops one of the copies of the data and
-    /// returns the other copy as a [`Taken`] smart pointer.
-    fn take_inner(&mut self) -> Option<Box<T>> {
+    fn drop(&mut self) {
         use std::ptr;
-        // Can only take inner once.
-        if self.taken {
-            return None;
-        }
-
-        // Disallow taking again.
-        self.taken = true;
-
-        // first, ensure both copies are up to date
-        // (otherwise safely dropping the possibly duplicated w_handle data is a pain)
-        // drain up to the swap_index, which is the number of operations that have been applied to the
-        // w_handle copy, but not the r_handle copy.
-        if !self.oplog.is_empty() {
+        // first, ensure the read handle is up-to-date with all operations
+        if self.swap_index != self.oplog.len() {
             self.publish();
         }
-        // drains the oplog fully because the swap_index is now equal to the oplog length.
-        if !self.oplog.is_empty() {
-            self.publish();
-        }
-        assert!(self.oplog.is_empty());
 
         // next, grab the read handle and set it to NULL
         let r_handle = self.r_handle.inner.swap(ptr::null_mut(), Ordering::Release);
@@ -110,8 +87,7 @@ where
         fence(Ordering::SeqCst);
 
         // all readers have now observed the NULL, so we own both handles.
-        // all operations have been applied to both w_handle and r_handle.
-        // give the underlying data structure an opportunity to handle the one copy differently:
+        // all operations have been applied to the r_handle.
         //
         // safety: w_handle was initially crated from a `Box`, and is no longer aliased.
         drop(unsafe { Box::from_raw(self.w_handle.as_ptr()) });
@@ -122,20 +98,7 @@ where
         // anymore (due to the .wait() following swapping the pointer with NULL).
         //
         // safety: r_handle was initially crated from a `Box`, and is no longer aliased.
-        let boxed_r_handle = unsafe { Box::from_raw(r_handle) };
-
-        Some(boxed_r_handle)
-    }
-}
-
-impl<T, O> Drop for WriteHandle<T, O>
-where
-    T: Absorb<O>,
-{
-    fn drop(&mut self) {
-        if let Some(inner) = self.take_inner() {
-            drop(inner);
-        }
+        drop(unsafe { Box::from_raw(r_handle) });
     }
 }
 
@@ -156,7 +119,6 @@ where
             is_waiting: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             refreshes: 0,
-            taken: false,
         }
     }
 
@@ -350,13 +312,54 @@ where
     /// Makes sure that all the pending operations are applied and waits till all the read handles
     /// have departed. Then it drops one of the copies of the data and
     /// returns the other copy in a Box.
-    pub fn take(mut self) -> Box<T> {
-        // It is always safe to `expect` here because `take_inner` is private
-        // and it is only called here and in the drop impl. Since we have an owned
-        // `self` we know the drop has not yet been called. And every first call of
-        // `take_inner` returns `Some`
-        self.take_inner()
-            .expect("inner is only taken here then self is dropped")
+    pub fn take(self) -> Box<T> {
+        use std::ptr;
+        use std::mem;
+        // first, ensure the read handle is up-to-date with all operations
+        let mut this = mem::ManuallyDrop::new(self);
+        if this.swap_index != this.oplog.len() {
+            this.publish();
+        }
+
+        // next, grab the read handle and set it to NULL
+        let r_handle = this.r_handle.inner.swap(ptr::null_mut(), Ordering::Release);
+
+        // now, wait for all readers to depart
+        // we need to make sure that the lock is relesed before we drop the w_handle
+        // to prevent a deadlock if a reader tries to acquire the lock on drop
+        {
+            let epochs = Arc::clone(&this.epochs);
+            let mut epochs = epochs.lock().unwrap();
+            this.wait(&mut epochs);
+        }
+
+        // ensure that the subsequent epoch reads aren't re-ordered to before the swap
+        fence(Ordering::SeqCst);
+
+        // all readers have now observed the NULL, so we own both handles.
+        // all operations have been applied to the r_handle.
+        //
+        // safety: w_handle was initially crated from a `Box`, and is no longer aliased.
+        drop(unsafe { Box::from_raw(this.w_handle.as_ptr()) });
+
+        // next we take the r_handle and return it as a boxed value.
+        //
+        // this is safe, since we know that no readers are using this pointer
+        // anymore (due to the .wait() following swapping the pointer with NULL).
+        //
+        // safety: r_handle was initially crated from a `Box`, and is no longer aliased.
+        let boxed_r_handle = unsafe { Box::from_raw(r_handle) };
+
+        // drop the other fields
+        unsafe { ptr::drop_in_place(&mut this.epochs) };
+        unsafe { ptr::drop_in_place(&mut this.oplog) };
+        unsafe { ptr::drop_in_place(&mut this.r_handle) };
+        unsafe { ptr::drop_in_place(&mut this.last_epochs) };
+        #[cfg(test)]
+        unsafe { ptr::drop_in_place(&mut this.is_waiting) };
+
+        // return the boxed r_handle
+        boxed_r_handle
     }
 }
 
