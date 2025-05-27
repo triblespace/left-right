@@ -75,7 +75,7 @@
 //! // and provide the datastructure types it operates over as generic arguments.
 //! // You can read this as "`CounterAddOp` can apply changes of types `i32` and `()`".
 //! impl Apply<i32, ()> for CounterAddOp {
-//!     // See the documentation of `Absorb::apply_first`.
+//!     // See the documentation of `Apply::apply_first`.
 //!     //
 //!     // Essentially, this is where you define what applying
 //!     // the oplog type to the datastructure does.
@@ -83,9 +83,9 @@
 //!         *first += self.0;
 //!     }
 //!
-//!     // See the documentation of `Absorb::absorb_second`.
+//!     // See the documentation of `Apply::apply_second`.
 //!     //
-//!     // This may or may not be the same as `absorb_first`,
+//!     // This may or may not be the same as `apply_first`,
 //!     // depending on whether or not you de-duplicate values
 //!     // across the two copies of your data structure.
 //!     fn apply_second(self, _: &i32, second: &mut i32, _: &mut ()) {
@@ -188,17 +188,15 @@ pub use crate::read::{ReadGuard, ReadHandle, ReadHandleFactory};
 /// structure is logged as an operation of type `O` in an _operational log_ (oplog), and is applied
 /// once to each copy of the data.
 ///
-/// Implementations should ensure that the absorbption of each `O` is deterministic. That is, if
-/// two instances of the implementing type are initially equal, and then absorb the same `O`,
+/// Implementations should ensure that the application of each operation is deterministic. That is, if
+/// two instances of the type `T` are initially equal, and the same operation is applied to both of them,
 /// they should remain equal afterwards. If this is not the case, the two copies will drift apart
 /// over time, and hold different values.
 ///
-/// The trait provides separate methods for the first and second absorption of each `O`. For many
-/// implementations, these will be the same (which is why `absorb_second` defaults to calling
-/// `absorb_first`), but not all. In particular, some implementations may need to modify the `O` to
-/// ensure deterministic results when it is applied to the second copy. Or, they may need to
-/// ensure that removed values in the data structure are only dropped when they are removed from
-/// _both_ copies, in case they alias the backing data to save memory.
+/// The trait provides separate methods for the first and second application of each operation. For many
+/// implementations, these will be the same (which is why `apply_second` defaults to calling
+/// `apply_first`), but not all. In particular, some implementations may need to modify the operation to
+/// ensure deterministic results when it is applied to the second copy.
 pub trait Apply<T, A>: Sized {
     /// Apply `O` to the first of the two copies.
     ///
@@ -219,7 +217,7 @@ pub trait Apply<T, A>: Sized {
     /// (like `Eq` and `Hash`), and of "hidden states" that subtly affect results like the
     /// `RandomState` of a `HashMap` which can change iteration order.
     ///
-    /// Defaults to calling `absorb_first`.
+    /// Defaults to calling `apply_first`.
     fn apply_second(mut self, first: &T, second: &mut T, auxiliary: &mut A) {
         Self::apply_first(&mut self, second, first, auxiliary);
     }

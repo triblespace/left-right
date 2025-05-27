@@ -236,7 +236,7 @@ where
                 O::apply_second(op, r_handle, w_handle, &mut self.auxiliary);
             }
         }
-        // we cannot give owned operations to absorb_first
+        // we cannot give owned operations to apply_first
         // since they'll also be needed by the r_handle copy
         for op in self.oplog.iter_mut() {
             O::apply_first(op, w_handle, r_handle, &mut self.auxiliary);
@@ -427,15 +427,15 @@ where
 /// use std::rc::Rc;
 ///
 /// struct Data(Rc<()>);
-/// impl reft_light::Absorb<()> for Data {
-///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
+/// impl reft_light::Apply<Data, ()> for () {
+///     fn apply_first(&mut self, _: &mut Data, _: &Data, _: &mut ()) {}
 /// }
 ///
 /// fn is_send<T: Send>() {
 ///   // dummy function just used for its parameterized type bound
 /// }
 ///
-/// is_send::<WriteHandle<Data, ()>>()
+/// is_send::<WriteHandle<(), Data, ()>>()
 /// ```
 ///
 /// .. the operation type has to be `Send`:
@@ -445,15 +445,15 @@ where
 /// use std::rc::Rc;
 ///
 /// struct Data;
-/// impl reft_light::Absorb<Rc<()>> for Data {
-///     fn absorb_first(&mut self, _: &mut Rc<()>, _: &Self) {}
+/// impl reft_light::Apply<Data, ()> for Rc<()> {
+///     fn apply_first(&mut self, _: &mut Data, _: &Data, _: &mut ()) {}
 /// }
 ///
 /// fn is_send<T: Send>() {
 ///   // dummy function just used for its parameterized type bound
 /// }
 ///
-/// is_send::<WriteHandle<Data, Rc<()>>>()
+/// is_send::<WriteHandle<Rc<()>, Data, ()>>()
 /// ```
 ///
 /// .. and the data type has to be `Sync` so it's still okay to read through `ReadHandle`s:
@@ -463,15 +463,15 @@ where
 /// use std::cell::Cell;
 ///
 /// struct Data(Cell<()>);
-/// impl reft_light::Absorb<()> for Data {
-///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
+/// impl reft_light::Apply<Data, ()> for () {
+///     fn apply_first(&mut self, _: &mut Data, _: &Data, _: &mut ()) {}
 /// }
 ///
 /// fn is_send<T: Send>() {
 ///   // dummy function just used for its parameterized type bound
 /// }
 ///
-/// is_send::<WriteHandle<Data, ()>>()
+/// is_send::<WriteHandle<(), Data, ()>>()
 /// ```
 #[allow(dead_code)]
 struct CheckWriteHandleSend;
