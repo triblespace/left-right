@@ -3,7 +3,7 @@
 mod loom_tests {
     // Evil hack to share CounterAddOp between
     // unit tests and integration tests.
-    use reft_light::Absorb;
+    use reft_light::Apply;
     include!("../src/utilities.rs");
 
     use loom::thread;

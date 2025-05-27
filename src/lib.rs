@@ -43,7 +43,8 @@
 //! Alternatively, there's a shorter (but also less complete) description in [this
 //! talk](https://www.youtube.com/watch?v=s19G6n0UjsM&t=1994).
 //!
-//! At a glance, left-right is implemented using two regular `T`s, an operational log, epoch
+//! At a glance, left-right is implemented using two regular `T`s,
+//! an auxiliary type `A` which is only used during writes, an operational log, epoch
 //! counting, and some pointer magic. There is a single pointer through which all readers go. It
 //! points to a `T` that the readers access in order to read data. Every time a read has accessed
 //! the pointer, they increment a local epoch counter, and they update it again when they have
@@ -64,22 +65,22 @@
 //! yourself, here's what you do:
 //!
 //! ```rust
-//! use reft_light::{Absorb, ReadHandle, WriteHandle};
+//! use reft_light::{Apply, ReadHandle, WriteHandle};
 //!
 //! // First, define an operational log type.
 //! // For most real-world use-cases, this will be an `enum`, but we'll keep it simple:
 //! struct CounterAddOp(i32);
 //!
-//! // Then, implement the unsafe `Absorb` trait for your data structure type,
-//! // and provide the oplog type as the generic argument.
-//! // You can read this as "`i32` can absorb changes of type `CounterAddOp`".
-//! impl Absorb<CounterAddOp> for i32 {
-//!     // See the documentation of `Absorb::absorb_first`.
+//! // Then, implement the `Apply` trait for that type,
+//! // and provide the datastructure types it operates over as generic arguments.
+//! // You can read this as "`CounterAddOp` can apply changes of types `i32` and `()`".
+//! impl Apply<i32, ()> for CounterAddOp {
+//!     // See the documentation of `Absorb::apply_first`.
 //!     //
 //!     // Essentially, this is where you define what applying
 //!     // the oplog type to the datastructure does.
-//!     fn absorb_first(&mut self, operation: &mut CounterAddOp, _: &Self) {
-//!         *self += operation.0;
+//!     fn apply_first(&mut self, first: &mut i32, _: &i32, _: &mut ()) {
+//!         *first += self.0;
 //!     }
 //!
 //!     // See the documentation of `Absorb::absorb_second`.
@@ -87,20 +88,20 @@
 //!     // This may or may not be the same as `absorb_first`,
 //!     // depending on whether or not you de-duplicate values
 //!     // across the two copies of your data structure.
-//!     fn absorb_second(&mut self, operation: CounterAddOp, _: &Self) {
-//!         *self += operation.0;
+//!     fn apply_second(self, _: &i32, second: &mut i32, _: &mut ()) {
+//!         *second += self.0;
 //!     }
 //! }
 //!
 //! // Now, you can construct a new left-right over an instance of your data structure.
 //! // This will give you a `WriteHandle` that accepts writes in the form of oplog entries,
 //! // which can be converted into a (cloneable) `ReadHandle` that gives you `&` access to the data structure.
-//! let write = reft_light::new::<i32, CounterAddOp>(0);
+//! let write = reft_light::new::<CounterAddOp, i32, ()>(0, ());
 //! let read = write.clone();
 //!
 //! // You will likely want to embed these handles in your own types so that you can
 //! // provide more ergonomic methods for performing operations on your type.
-//! struct Counter(WriteHandle<i32, CounterAddOp>);
+//! struct Counter(WriteHandle<CounterAddOp, i32, ()>);
 //! impl Counter {
 //!     // The methods on you write handle type will likely all just add to the operational log.
 //!     pub fn add(&mut self, i: i32) {
@@ -198,13 +199,13 @@ pub use crate::read::{ReadGuard, ReadHandle, ReadHandleFactory};
 /// ensure deterministic results when it is applied to the second copy. Or, they may need to
 /// ensure that removed values in the data structure are only dropped when they are removed from
 /// _both_ copies, in case they alias the backing data to save memory.
-pub trait Absorb<O> {
+pub trait Apply<T, A>: Sized {
     /// Apply `O` to the first of the two copies.
     ///
     /// `other` is a reference to the other copy of the data, which has seen all operations up
     /// until the previous call to [`WriteHandle::publish`]. That is, `other` is one "publish
     /// cycle" behind.
-    fn absorb_first(&mut self, operation: &mut O, other: &Self);
+    fn apply_first(&mut self, first: &mut T, second: &T, auxiliary: &mut A);
 
     /// Apply `O` to the second of the two copies.
     ///
@@ -219,21 +220,22 @@ pub trait Absorb<O> {
     /// `RandomState` of a `HashMap` which can change iteration order.
     ///
     /// Defaults to calling `absorb_first`.
-    fn absorb_second(&mut self, mut operation: O, other: &Self) {
-        Self::absorb_first(self, &mut operation, other)
+    fn apply_second(mut self, first: &T, second: &mut T, auxiliary: &mut A) {
+        Self::apply_first(&mut self, second, first, auxiliary);
     }
 }
 
-/// Construct a new write handle from an initial data structure.
+/// Construct a new write handle from an initial swapping value and an auxiliary value.
 ///
-/// The type must implement `Clone` so we can construct the second copy from the first.
-pub fn new<T, O>(t: T) -> WriteHandle<T, O>
+/// The swapping type must implement `Clone` so we can construct the second copy from the first.
+pub fn new<O, T, A>(init: T, auxiliary: A) -> WriteHandle<O, T, A>
 where
-    T: Absorb<O> + Clone,
+    O: Apply<T, A>,
+    T: Clone,
 {
     let epochs = Default::default();
 
-    let r = ReadHandle::new(t.clone(), Arc::clone(&epochs));
-    let w = WriteHandle::new(t, epochs, r);
+    let r = ReadHandle::new(init.clone(), Arc::clone(&epochs));
+    let w = WriteHandle::new(init, epochs, r, auxiliary);
     w
 }

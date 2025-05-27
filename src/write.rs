@@ -1,5 +1,5 @@
 use crate::read::ReadHandle;
-use crate::Absorb;
+use crate::Apply;
 
 use crate::sync::{fence, Arc, AtomicUsize, MutexGuard, Ordering};
 use std::collections::VecDeque;
@@ -20,9 +20,9 @@ use std::{fmt, thread};
 /// since the reads go through a [`ReadHandle`], those reads are subject to the same visibility
 /// restrictions as reads that do not go through the `WriteHandle`: they only see the effects of
 /// operations prior to the last call to [`publish`](Self::publish).
-pub struct WriteHandle<T, O>
+pub struct WriteHandle<O, T, A>
 where
-    T: Absorb<O>,
+    O: Apply<T, A>,
 {
     epochs: crate::Epochs,
     w_handle: NonNull<T>,
@@ -30,6 +30,7 @@ where
     swap_index: usize,
     r_handle: ReadHandle<T>,
     last_epochs: Vec<usize>,
+    auxiliary: A,
     #[cfg(test)]
     refreshes: usize,
     #[cfg(test)]
@@ -39,19 +40,21 @@ where
 // safety: if a `WriteHandle` is sent across a thread boundary, we need to be able to take
 // ownership of both Ts and Os across that thread boundary. since `WriteHandle` holds a
 // `ReadHandle`, we also need to respect its Send requirements.
-unsafe impl<T, O> Send for WriteHandle<T, O>
+unsafe impl<O, T, A> Send for WriteHandle<O, T, A>
 where
-    T: Absorb<O>,
+    O: Apply<T, A>,
     T: Send,
     O: Send,
+    A: Send,
     ReadHandle<T>: Send,
 {
 }
 
-impl<T, O> fmt::Debug for WriteHandle<T, O>
+impl<O, T, A> fmt::Debug for WriteHandle<O, T, A>
 where
-    T: Absorb<O> + fmt::Debug,
+    O: Apply<T, A> + fmt::Debug,
     O: fmt::Debug,
+    A: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WriteHandle")
@@ -60,13 +63,14 @@ where
             .field("oplog", &self.oplog)
             .field("swap_index", &self.swap_index)
             .field("r_handle", &self.r_handle)
+            .field("auxiliary", &self.auxiliary)
             .finish()
     }
 }
 
-impl<T, O> Drop for WriteHandle<T, O>
+impl<O, T, A> Drop for WriteHandle<O, T, A>
 where
-    T: Absorb<O>,
+    O: Apply<T, A>,
 {
     fn drop(&mut self) {
         use std::ptr;
@@ -102,11 +106,16 @@ where
     }
 }
 
-impl<T, O> WriteHandle<T, O>
+impl<O, T, A> WriteHandle<O, T, A>
 where
-    T: Absorb<O>,
+    O: Apply<T, A>,
 {
-    pub(crate) fn new(w_handle: T, epochs: crate::Epochs, r_handle: ReadHandle<T>) -> Self {
+    pub(crate) fn new(
+        w_handle: T,
+        epochs: crate::Epochs,
+        r_handle: ReadHandle<T>,
+        auxiliary: A,
+    ) -> Self {
         Self {
             epochs,
             // safety: Box<T> is not null and covariant.
@@ -115,6 +124,7 @@ where
             swap_index: 0,
             r_handle,
             last_epochs: Vec::new(),
+            auxiliary,
             #[cfg(test)]
             is_waiting: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -223,13 +233,13 @@ where
             //
             // NOTE: the if above is because drain(0..0) would remove 0
             for op in self.oplog.drain(0..self.swap_index) {
-                T::absorb_second(w_handle, op, r_handle);
+                O::apply_second(op, r_handle, w_handle, &mut self.auxiliary);
             }
         }
         // we cannot give owned operations to absorb_first
         // since they'll also be needed by the r_handle copy
         for op in self.oplog.iter_mut() {
-            T::absorb_first(w_handle, op, r_handle);
+            O::apply_first(op, w_handle, r_handle, &mut self.auxiliary);
         }
         // the w_handle copy is about to become the r_handle, and can ignore the oplog
         self.swap_index = self.oplog.len();
@@ -367,9 +377,9 @@ where
 
 // allow using write handle for reads
 use std::ops::Deref;
-impl<T, O> Deref for WriteHandle<T, O>
+impl<O, T, A> Deref for WriteHandle<O, T, A>
 where
-    T: Absorb<O>,
+    O: Apply<T, A>,
 {
     type Target = ReadHandle<T>;
     fn deref(&self) -> &Self::Target {
@@ -377,9 +387,9 @@ where
     }
 }
 
-impl<T, O> Extend<O> for WriteHandle<T, O>
+impl<O, T, A> Extend<O> for WriteHandle<O, T, A>
 where
-    T: Absorb<O>,
+    O: Apply<T, A>,
 {
     /// Add multiple operations to the operational log.
     ///
@@ -398,15 +408,15 @@ where
 /// use reft_light::WriteHandle;
 ///
 /// struct Data;
-/// impl reft_light::Absorb<()> for Data {
-///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
+/// impl reft_light::Apply<Data, ()> for () {
+///     fn apply_first(&mut self, _: &mut Data, _: &Data, _: &mut ()) {}
 /// }
 ///
 /// fn is_send<T: Send>() {
 ///   // dummy function just used for its parameterized type bound
 /// }
 ///
-/// is_send::<WriteHandle<Data, ()>>()
+/// is_send::<WriteHandle<(), Data, ()>>()
 /// ```
 ///
 /// As long as the inner types allow that of course.
@@ -469,13 +479,13 @@ struct CheckWriteHandleSend;
 #[cfg(test)]
 mod tests {
     use crate::sync::{AtomicUsize, Mutex, Ordering};
-    use crate::Absorb;
+    use crate::Apply;
     use slab::Slab;
     include!("./utilities.rs");
 
     #[test]
     fn append_test() {
-        let mut w = crate::new::<i32, _>(0);
+        let mut w = crate::new::<CounterAddOp, _, _>(0, ());
         w.append(CounterAddOp(1));
         assert_eq!(w.oplog.len(), 1);
         w.publish();
@@ -487,7 +497,7 @@ mod tests {
     #[test]
     fn take_test() {
         // publish twice then take with no pending operations
-        let mut w = crate::new::<i32, _>(2);
+        let mut w = crate::new::<CounterAddOp, _, _>(2, ());
         w.append(CounterAddOp(1));
         w.publish();
         w.append(CounterAddOp(1));
@@ -495,7 +505,7 @@ mod tests {
         assert_eq!(*w.take(), 4);
 
         // publish twice then pending operation published by take
-        let mut w = crate::new::<i32, _>(2);
+        let mut w = crate::new::<CounterAddOp, _, _>(2, ());
         w.append(CounterAddOp(1));
         w.publish();
         w.append(CounterAddOp(1));
@@ -504,25 +514,25 @@ mod tests {
         assert_eq!(*w.take(), 6);
 
         // normal publish then pending operations published by take
-        let mut w = crate::new::<i32, _>(2);
+        let mut w = crate::new::<CounterAddOp, _, _>(2, ());
         w.append(CounterAddOp(1));
         w.publish();
         w.append(CounterAddOp(1));
         assert_eq!(*w.take(), 4);
 
         // pending operations published by take
-        let mut w = crate::new::<i32, _>(2);
+        let mut w = crate::new::<CounterAddOp, _, _>(2, ());
         w.append(CounterAddOp(1));
         assert_eq!(*w.take(), 3);
 
         // emptry op queue
-        let mut w = crate::new::<i32, _>(2);
+        let mut w = crate::new::<CounterAddOp, _, _>(2, ());
         w.append(CounterAddOp(1));
         w.publish();
         assert_eq!(*w.take(), 3);
 
         // no operations
-        let w = crate::new::<i32, _>(2);
+        let w = crate::new::<CounterAddOp, _, _>(2, ());
         assert_eq!(*w.take(), 2);
     }
 
@@ -530,7 +540,7 @@ mod tests {
     fn wait_test() {
         use std::sync::{Arc, Barrier};
         use std::thread;
-        let mut w = crate::new::<i32, _>(0);
+        let mut w = crate::new::<CounterAddOp, _, _>(0, ());
 
         // Case 1: If epoch is set to default.
         let test_epochs: crate::Epochs = Default::default();
@@ -580,7 +590,7 @@ mod tests {
 
     #[test]
     fn flush_noblock() {
-        let mut w = crate::new::<i32, _>(0);
+        let mut w = crate::new::<CounterAddOp, _, _>(0, ());
         let r = w.clone();
         w.append(CounterAddOp(42));
         w.publish();
@@ -595,7 +605,7 @@ mod tests {
 
     #[test]
     fn flush_no_refresh() {
-        let mut w = crate::new::<i32, _>(0);
+        let mut w = crate::new::<CounterAddOp, _, _>(0, ());
 
         // Until we refresh, writes are written directly instead of going to the
         // oplog (because there can't be any readers on the w_handle table).

@@ -3,12 +3,12 @@
 pub struct CounterAddOp(pub i32);
 
 #[cfg(test)]
-impl Absorb<CounterAddOp> for i32 {
-    fn absorb_first(&mut self, operation: &mut CounterAddOp, _: &Self) {
-        *self += operation.0;
+impl Apply<i32, ()> for CounterAddOp {
+    fn apply_first(&mut self, first: &mut i32, _: &i32, _: &mut ()) {
+        *first += self.0;
     }
 
-    fn absorb_second(&mut self, operation: CounterAddOp, _: &Self) {
-        *self += operation.0;
+    fn apply_second(self, _: &i32, second: &mut i32, _: &mut ()) {
+        *second += self.0;
     }
 }
