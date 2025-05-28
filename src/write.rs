@@ -304,17 +304,14 @@ where
         self
     }
 
-    /// Returns a raw pointer to the write copy of the data (the one readers are _not_ accessing).
-    ///
-    /// Note that it is only safe to mutate through this pointer if you _know_ that there are no
-    /// readers still present in this copy. This is not normally something you know; even after
-    /// calling `publish`, readers may still be in the write copy for some time. In general, the
-    /// only time you know this is okay is before the first call to `publish` (since no readers
-    /// ever entered the write copy).
-    // TODO: Make this return `Option<&mut T>`,
-    // and only `Some` if there are indeed to readers in the write copy.
-    pub fn raw_write_handle(&mut self) -> NonNull<T> {
-        self.w_handle
+    /// Returns a reference to the auxiliary data.
+    pub fn auxiliary(&self) -> &A {
+        &self.auxiliary
+    }
+
+    /// Returns a mutable reference to the auxiliary data structure.
+    pub fn auxiliary_mut(&mut self) -> &mut A {
+        &mut self.auxiliary
     }
 
     /// Returns the backing data structure.
