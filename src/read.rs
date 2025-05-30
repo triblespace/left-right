@@ -76,6 +76,14 @@ impl<T> Clone for ReadHandle<T> {
     }
 }
 
+impl<T> PartialEq for ReadHandle<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl<T> Eq for ReadHandle<T> {}
+
 impl<T> ReadHandle<T> {
     pub(crate) fn new(inner: T, epochs: crate::Epochs) -> Self {
         let store = Box::into_raw(Box::new(inner));
